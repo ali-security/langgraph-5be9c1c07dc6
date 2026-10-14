@@ -7,6 +7,18 @@ on:
         required: true
         type: string
         description: "From which folder this pipeline executes"
+  workflow_dispatch:
+    inputs:
+      working-directory:
+        required: false
+        type: string
+        default: "libs/checkpoint-sqlite"
+        description: "From which folder this pipeline executes"
+      test-filter:
+        required: false
+        type: string
+        default: ""
+        description: "Optional pytest selector to run a subset of tests"
 
 permissions:
   contents: read
@@ -14,6 +26,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         python-version:
@@ -32,9 +45,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache-suffix: test-${{ inputs.working-directory }}
           working-directory: ${{ inputs.working-directory }}
+      # sealed fork build: no Docker Hub secrets on the fork
       - name: Login to Docker Hub
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
-        if: ${{ !github.event.pull_request.head.repo.fork }}
+        if: ${{ false }}
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_RO_TOKEN }}
@@ -47,7 +61,12 @@ jobs:
       - name: Run tests
         shell: bash
         working-directory: ${{ inputs.working-directory }}
-        run: make test
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            make test TEST="${{ inputs.test-filter }}"
+          else
+            make test
+          fi
 
       - name: Ensure the tests did not create any additional files
         shell: bash
@@ -61,3 +80,19 @@ jobs:
           # grep will exit non-zero if the target message isn't found,
           # and `set -e` above will cause the step to fail.
           echo "$STATUS" | grep 'nothing to commit, working tree clean'
+
+      - name: Build project for distribution
+        if: ${{ matrix.python-version == '3.11' }}
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          echo "hatchling==1.29.0" > "$RUNNER_TEMP/build-constraints.txt"
+          uv build --build-constraint "$RUNNER_TEMP/build-constraints.txt"
+
+      - name: Upload build
+        if: ${{ matrix.python-version == '3.11' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: ${{ inputs.working-directory }}/dist/
+          if-no-files-found: error
